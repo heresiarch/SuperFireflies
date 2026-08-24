@@ -286,6 +286,7 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         a = *wp;
+        a = (uint8_t)(((uint16_t)a * a) >> 8);  /* Gamma 2.0 */
         if (++wp >= (const uint8_t *)(fly[0].wave_end))
             wp = 0;
         fly[0].wave_ptr = (uint16_t)wp;
@@ -300,6 +301,7 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         b = *wp;
+        b = (uint8_t)(((uint16_t)b * b) >> 8);  /* Gamma 2.0 */
         if (++wp >= (const uint8_t *)(fly[1].wave_end))
             wp = 0;
         fly[1].wave_ptr = (uint16_t)wp;
@@ -314,6 +316,7 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         c = *wp;
+        c = (uint8_t)(((uint16_t)c * c) >> 8);  /* Gamma 2.0 */
         if (++wp >= (const uint8_t *)(fly[2].wave_end))
             wp = 0;
         fly[2].wave_ptr = (uint16_t)wp;
@@ -624,11 +627,13 @@ uint16_t update_fireflies(void)
 
     /*
      * Return PIT cycles until next update.
-     * Cap at ~10 seconds for natural animation pacing.
+     * Multiply by 4 to stretch inter-animation pauses.
+     * Cap at ~60 seconds.
      */
-    if (food > 625)
-        food = 625;
-    return food;
+    uint32_t result = (uint32_t)food * 4;
+    if (result > 3750)
+        result = 3750;
+    return (uint16_t)result;
 }
 
 
