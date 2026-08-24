@@ -160,7 +160,7 @@ Other supported programmers: `snap_updi`, `pickit4_updi`, `atmelice_updi`.
 
 | Fuse | Value | Meaning |
 |------|-------|---------|
-| WDTCFG | 0x09 | WDT enabled, normal mode, 2s timeout (crash guard) |
+| WDTCFG | 0x0B | WDT enabled, normal mode, 8s timeout (crash guard) |
 | BODCFG | 0x00 | Brown-out detection disabled |
 | OSCCFG | 0x02 | 20 MHz internal oscillator |
 | TCD0CFG | 0x00 | Default (TCD0 not used) |
@@ -181,49 +181,72 @@ you can always reprogram the chip without an HV programmer.
 ┌─────────────────────────────────────────────────────────┐
 │                    FAST DOMAIN (ISRs)                    │
 │                                                         │
-│  TCA0 (39 kHz overflow)     TCB0 (488 Hz)              │
-│  ├─ OVF: row switch         └─ Wave advancement        │
-│  ├─ CMP0: LED off                (3 fireflies/call)    │
-│  ├─ CMP1: LED off                Pre-computes PWM      │
-│  └─ CMP2: LED off                values for TCA0       │
+│  TCA0 (305 Hz overflow, 76 Hz per LED)                  │
+│  ├─ OVF: all LEDs off, read waves, sort, set PORTOUT    │
+│  ├─ CMP0: turn ON brightest LED (fires first)           │
+│  ├─ CMP1: add medium LED                                │
+│  └─ CMP2: add dimmest LED (fires last)                  │
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │                    SLOW DOMAIN (main loop)              │
 │                                                         │
 │  RTC/PIT ──► FLAG_UPDATE ──► update_fireflies()        │
-│              (125ms–1s)       energy/hungry logic       │
+│              (16ms–1s)        energy/hungry logic       │
 │                                                         │
 │  Periodic ──► measure_isnight() ──► day/night switch   │
 │                                                         │
-│  WDT (2s) ──► crash guard (hardware reset)             │
+│  WDT (8s) ──► crash guard (hardware reset)             │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Two Timing Domains
+### Single-Timer PWM (Same Architecture as Original)
 
-**TCB0 + TCA0 — fast domain (ISRs)**
+The firmware uses a single timer (TCA0) for both wave playback and
+charlieplex PWM — the same approach as the original ATtiny45 project.
+TCA0 runs at 20 MHz / 256 / 256 = 305 Hz overflow rate. With 4
+charlieplex rows cycling, each LED refreshes at ~76 Hz.
 
-- **TCA0** runs at 20 MHz / 2 / 256 = ~39 kHz overflow rate. With 4
-  charlieplex rows, each LED refreshes at ~9.7 kHz (flicker-free).
-  Three compare channels (CMP0/CMP1/CMP2) provide per-LED duty cycle
-  control within each row period.
+Each overflow handles one row of 3 fireflies:
+1. Reads the current wave sample for each firefly
+2. Sorts brightness values descending
+3. Negates them (converts to "time until turn-on")
+4. Programs CMP0/CMP1/CMP2 with the negated values
+5. Sets PORTOUT for the row drive pin
 
-- **TCB0** fires at ~488 Hz. Each ISR call advances wave pointers for
-  3 fireflies, sorts brightness values, and pre-computes the DDR/CMP
-  data that TCA0 will use. With 4 groups of 3, all 12 fireflies get
-  updated every 4 calls = **~122 Hz effective wave sample rate**
-  (identical to the original project).
+The three TCA0 compare channels then **progressively turn LEDs ON**:
+- CMP0 fires first (negated brightest = smallest value) → brightest LED on
+- CMP1 fires next → medium LED joins
+- CMP2 fires last (negated dimmest = largest value) → dimmest LED joins
+- All LEDs stay on until the next overflow resets everything
 
-**RTC/PIT — slow domain (main loop)**
+This progressive turn-on approach eliminates ghost glow completely:
+LEDs start OFF at each overflow and only get activated by their
+specific compare match. No LED is ever briefly pulsed unintentionally.
 
-The Periodic Interrupt Timer wakes the CPU from STANDBY sleep at
-configurable intervals (125 ms to 1 s). On wakeup, the main loop:
+### Anti-Ghost Design
 
-1. Calls `update_fireflies()` — assigns new wave patterns, calculates
-   energy transfer between neighboring fireflies, returns time until
-   next update.
-2. Programs the PIT for the next interval.
-3. Periodically calls `measure_isnight()` to check the LDR.
+Charlieplex matrices are prone to ghost lighting — parasitic current
+through floating pins can dimly illuminate unintended LEDs. The
+progressive turn-on approach avoids this entirely:
+
+1. **OVF ISR clears both DIR and OUT** — all pins become high-impedance
+   inputs with no output driver. Zero current flows.
+2. **OUT is set to row drive value** — but DIR is still 0, so no pin
+   actually drives anything yet.
+3. **CMP ISRs enable DIR only for active LEDs** — pins are only made
+   outputs when it's time for their specific LED to conduct.
+4. **Inactive LEDs never get their DIR set** — if brightness is 0,
+   that LED's DDR bits are zeroed before the cumulative OR.
+
+This means at no point during the PWM cycle does an unintended LED
+get even a brief pulse of current.
+
+### Wave Playback Rate
+
+Each overflow processes one row (3 fireflies). With 4 rows cycling,
+each firefly's wave pointer advances once every 4 overflows =
+305 / 4 = **~76 Hz per firefly**. This is close to the original's
+122 Hz and produces smooth, natural-looking glow animations.
 
 ### Firefly Simulation
 
@@ -243,7 +266,7 @@ immediate re-flashing, creating natural spacing.
 
 | Condition | Sleep Mode | Active Peripherals | Current |
 |-----------|-----------|-------------------|---------|
-| Fireflies active | IDLE | TCA0, TCB0, PIT | ~3–4 mA |
+| Fireflies active | IDLE | TCA0, PIT | ~3–4 mA |
 | Between flashes (night) | STANDBY | PIT only | ~0.7 µA |
 | Daytime (waiting) | STANDBY | PIT only | ~0.7 µA |
 | LDR measurement | STANDBY | ADC (RUNSTDBY) + PIT | ~0.7 µA + ADC |
@@ -254,9 +277,9 @@ the battery's self-discharge limit.
 
 ### Watchdog Crash Recovery
 
-The WDT is configured via fuse (WDTCFG = 0x09) as a pure crash guard
-with a 2-second timeout. The main loop kicks it (`wdr`) every iteration.
-If main() hangs, the WDT resets the chip after 2 seconds. No dual-purpose
+The WDT is configured via fuse (WDTCFG = 0x0B) as a pure crash guard
+with an 8-second timeout. The main loop kicks it (`wdr`) every iteration.
+If main() hangs, the WDT resets the chip after 8 seconds. No dual-purpose
 interrupt/timing — that's handled by the PIT.
 
 ### Wave Table
@@ -276,7 +299,7 @@ memory-mapped flash). The number of waves is always a power of 2
 ## Resource Usage
 
 ```
-Flash: 3862 / 4096 bytes (94.3%)
+Flash: 3760 / 4096 bytes (91.8%)
 RAM:   136  / 256  bytes (53.1%)
 ```
 
@@ -290,7 +313,7 @@ are needed, consider the ATtiny1614 (16 KB flash, same pinout family).
 | File | Contents |
 |------|----------|
 | `src/firefly.h` | Types, macros, flag definitions, pin assignments, extern declarations |
-| `src/firefly.c` | DDR table, EEPROM, init(), TCA0/TCB0 ISRs, update_fireflies() |
+| `src/firefly.c` | DDR table, EEPROM, init(), TCA0 ISRs (OVF+CMP), update_fireflies() |
 | `src/main.c` | Main loop, LDR measurement, PIT ISR, sleep management |
 | `src/lfsr32.c/h` | 32-bit LFSR pseudo-random number generator |
 | `src/wave.h` | Wave table data (1654 bytes) and 32 wave descriptors |
@@ -303,12 +326,14 @@ are needed, consider the ATtiny1614 (16 KB flash, same pinout family).
 | Aspect | ATtiny45 (old) | ATtiny412 (new) |
 |--------|---------------|-----------------|
 | Clock | 8 MHz | 20 MHz |
-| PWM frequency | ~122 Hz per LED | ~9,700 Hz per LED |
-| Wave sample rate | ~122 Hz | ~122 Hz (unchanged) |
-| PWM method | Software (Timer0 OVF + single OCR) | Hardware (TCA0 with 3 CMP channels) |
-| Wave timer | Same as PWM timer | Separate TCB0 |
-| Sleep timing | WDT (dual-purpose) | RTC/PIT (dedicated) |
-| Crash guard | WDT interrupt+reset trick | WDT pure reset (fuse) |
+| Clock prescaler | None (fuse) | /6 default, disabled in software |
+| PWM frequency | ~122 Hz per LED | ~76 Hz per LED |
+| PWM method | Timer0 OVF + single OCR reprogram | TCA0 OVF + 3 CMP channels (no reprogram) |
+| PWM approach | Progressive LED turn-ON | Same progressive turn-ON (anti-ghost) |
+| Wave sample rate | ~122 Hz | ~76 Hz |
+| Wave timer | Same as PWM timer | Same as PWM timer (TCA0 only) |
+| Sleep timing | WDT (dual-purpose) | RTC/PIT (dedicated, RUNSTDBY) |
+| Crash guard | WDT interrupt+reset trick | WDT pure reset (8s fuse) |
 | Flash access | PROGMEM + pgm_read | Direct pointer (memory-mapped) |
 | Pin access | PORTB/DDRB (SBI/CBI) | VPORTA (single-cycle) |
 | ADC measurement | CPU polling in ADC noise reduction | RUNSTDBY (CPU sleeps during conversion) |

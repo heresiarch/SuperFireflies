@@ -624,10 +624,10 @@ uint16_t update_fireflies(void)
 
     /*
      * Return PIT cycles until next update.
-     * Cap at ~5 seconds for responsive animation.
+     * Cap at ~10 seconds for natural animation pacing.
      */
-    if (food > 312)
-        food = 312;
+    if (food > 625)
+        food = 625;
     return food;
 }
 
