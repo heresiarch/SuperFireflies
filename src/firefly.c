@@ -268,8 +268,9 @@ ISR(TCA0_OVF_vect)
     uint8_t a_ddr, b_ddr, c_ddr;
     uint8_t tmp;
 
-    /* All LEDs off immediately. */
+    /* All LEDs off — high impedance. */
     VPORTA.DIR = 0;
+    VPORTA.OUT = 0;
 
     /* Load current state. */
     firefly_p fly = _fly_ptr;
@@ -285,6 +286,7 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         a = *wp;
+        if (a < 60) a = 60;  /* Brightness floor — ATtiny412 needs higher minimum */
         if (++wp >= (const uint8_t *)(fly[0].wave_end))
             wp = 0;
         fly[0].wave_ptr = (uint16_t)wp;
@@ -299,6 +301,7 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         b = *wp;
+        if (b < 60) b = 60;
         if (++wp >= (const uint8_t *)(fly[1].wave_end))
             wp = 0;
         fly[1].wave_ptr = (uint16_t)wp;
@@ -313,6 +316,7 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         c = *wp;
+        if (c < 60) c = 60;
         if (++wp >= (const uint8_t *)(fly[2].wave_end))
             wp = 0;
         fly[2].wave_ptr = (uint16_t)wp;
@@ -396,7 +400,7 @@ ISR(TCA0_OVF_vect)
 
     if (a == 0)
     {
-        /* No LED active — clear interrupt flag and return. */
+        /* No LED active. */
         TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
         return;
     }
@@ -422,10 +426,10 @@ ISR(TCA0_OVF_vect)
     TCA0.SINGLE.CMP1 = b;
     TCA0.SINGLE.CMP2 = c;
 
-    /* Drive the row pin high, others low. */
+    /* Drive the row pin high. */
     VPORTA.OUT = row_drive;
 
-    /* Turn on active LEDs. */
+    /* Only active LED pairs as output. */
     VPORTA.DIR = ddr_all;
 
     /* Store DDR states for CMP ISRs. */
@@ -445,7 +449,9 @@ ISR(TCA0_OVF_vect)
 
 ISR(TCA0_CMP0_vect)
 {
-    VPORTA.DIR = pwm_buf.ddr_row[0][2];
+    uint8_t ddr = pwm_buf.ddr_row[0][2];
+    VPORTA.DIR = ddr;
+    if (ddr == 0) VPORTA.OUT = 0;
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP0_bm;
 }
 
@@ -458,7 +464,9 @@ ISR(TCA0_CMP0_vect)
 
 ISR(TCA0_CMP1_vect)
 {
-    VPORTA.DIR = pwm_buf.ddr_row[0][3];
+    uint8_t ddr = pwm_buf.ddr_row[0][3];
+    VPORTA.DIR = ddr;
+    if (ddr == 0) VPORTA.OUT = 0;
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP1_bm;
 }
 
@@ -472,6 +480,7 @@ ISR(TCA0_CMP1_vect)
 ISR(TCA0_CMP2_vect)
 {
     VPORTA.DIR = 0;
+    VPORTA.OUT = 0;
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP2_bm;
 }
 
@@ -507,6 +516,26 @@ uint16_t update_fireflies(void)
         if ((fly->wave_ptr == 0) &&
             (fly->hungry == 0))
         {
+            /*
+             * Only allow one firefly per row to start.
+             * Check if any sibling in this row group already has an active wave.
+             */
+            uint8_t pos = (uint8_t)((fly - &fireflies[0]) % 3);
+            firefly_p row_start = fly - pos;
+            uint8_t row_active = 0;
+            for (uint8_t k = 0; k < 3; k++)
+            {
+                if (row_start[k].wave_ptr != 0)
+                    row_active = 1;
+            }
+            if (row_active)
+            {
+                /* Another firefly in this row is playing — skip. */
+                fly->hungry = lfsr(5) + 1;
+                fly++;
+                continue;
+            }
+
             /*
              * Select one of the 32 waves randomly.
              */
@@ -604,8 +633,9 @@ uint16_t update_fireflies(void)
 
     /*
      * Return PIT cycles until next update.
+     * Divided by 4 for faster cycle testing.
      */
-    return food;
+    return food / 4;
 }
 
 
@@ -664,9 +694,9 @@ void init(void)
 
     /*
      * TCA0 — Normal mode, prescaler /256, PER=255.
-     * 20MHz / 256 / 256 = ~305 Hz overflow rate.
-     * 4 rows → ~76 Hz per LED.
-     * Matches original brightness behavior.
+     * 20MHz / 256 / 256 = 305 Hz overflow rate.
+     * 4 rows → 76 Hz per LED.
+     * No brightness scaling needed (full 0-255 range).
      * Initially stopped.
      */
     TCA0.SINGLE.CTRLA = 0;  /* stopped */
