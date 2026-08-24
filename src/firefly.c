@@ -127,7 +127,7 @@ void save_seed(void)
 
 void tca0_start(void)
 {
-    TCA0.SINGLE.CTRLA = TCA_SINGLE_CLKSEL_DIV2_gc | TCA_SINGLE_ENABLE_bm;
+    TCA0.SINGLE.CTRLA = TCA_SINGLE_CLKSEL_DIV256_gc | TCA_SINGLE_ENABLE_bm;
 }
 
 
@@ -140,14 +140,13 @@ void tca0_stop(void)
 
 void tcb0_start(void)
 {
-    TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
+    /* TCB0 no longer used — wave advancement in TCA0 OVF. */
 }
 
 
 void tcb0_stop(void)
 {
-    TCB0.CTRLA = 0;
-    TCB0.CNT = 0;
+    /* TCB0 no longer used. */
 }
 
 
@@ -254,108 +253,32 @@ uint16_t pit_setup(uint16_t time)
 
 /*
  * ============================================================
- * TCA0 OVERFLOW ISR — Row Switch
+ * TCA0 OVERFLOW ISR — Row Switch + Wave Advancement
  * ============================================================
  *
- * Fires at ~39 kHz (20MHz / 2 / 256).
- * Switches charlieplex row and loads pre-computed brightness
- * values into CMP registers.
+ * Fires at ~305 Hz (20MHz / 256 / 256).
+ * Each call handles one row: reads wave samples, sorts,
+ * sets up CMP registers and DDR. Same approach as original.
+ * 4 rows → ~76 Hz per firefly wave sample rate.
  */
 
 ISR(TCA0_OVF_vect)
 {
-    /* All LEDs off immediately. */
-    VPORTA.DIR = 0;
-
-    /* Advance to next row. */
-    uint8_t row = _row_idx;
-    row = (row + 1) & 0x03;
-    _row_idx = row;
-
-    /* Load pre-computed values. */
-    uint8_t cmp0 = pwm_buf.brightness[row][0];
-    uint8_t cmp1 = pwm_buf.brightness[row][1];
-    uint8_t cmp2 = pwm_buf.brightness[row][2];
-
-    /* Set compare registers. */
-    TCA0.SINGLE.CMP0 = cmp0;
-    TCA0.SINGLE.CMP1 = cmp1;
-    TCA0.SINGLE.CMP2 = cmp2;
-
-    /* Drive the row pin high, others low. */
-    VPORTA.OUT = pwm_buf.ddr_row[row][0];
-
-    /* Turn on all 3 LEDs (set DDR for all active pins). */
-    VPORTA.DIR = pwm_buf.ddr_row[row][1];
-
-    /* Clear interrupt flag. */
-    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
-}
-
-
-/*
- * ============================================================
- * TCA0 CMP0 ISR — Turn off brightest LED
- * ============================================================
- */
-
-ISR(TCA0_CMP0_vect)
-{
-    VPORTA.DIR = pwm_buf.ddr_row[_row_idx][2];
-    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP0_bm;
-}
-
-
-/*
- * ============================================================
- * TCA0 CMP1 ISR — Turn off 2nd LED
- * ============================================================
- */
-
-ISR(TCA0_CMP1_vect)
-{
-    VPORTA.DIR = pwm_buf.ddr_row[_row_idx][3];
-    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP1_bm;
-}
-
-
-/*
- * ============================================================
- * TCA0 CMP2 ISR — Turn off dimmest LED (all off)
- * ============================================================
- */
-
-ISR(TCA0_CMP2_vect)
-{
-    VPORTA.DIR = 0;
-    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP2_bm;
-}
-
-
-/*
- * ============================================================
- * TCB0 ISR — Wave Advancement (~488 Hz)
- * ============================================================
- *
- * Advances wave pointers for 3 fireflies per call.
- * Pre-computes sorted brightness and DDR masks for TCA0.
- * Cycles through all 4 groups (12 fireflies) every 4 calls
- * = ~122 Hz effective per-firefly sample rate.
- */
-
-ISR(TCB0_INT_vect)
-{
-    firefly_p fly = _fly_ptr;
-    uint8_t ddr_index = _ddr_idx;
-
     uint8_t a, b, c;
     uint8_t a_ddr, b_ddr, c_ddr;
     uint8_t tmp;
-    const uint8_t *wp;
+
+    /* All LEDs off immediately. */
+    VPORTA.DIR = 0;
+
+    /* Load current state. */
+    firefly_p fly = _fly_ptr;
+    uint8_t ddr_index = _ddr_idx;
 
     /*
      * Read wave samples and advance pointers.
      */
+    const uint8_t *wp;
 
     /* Firefly A */
     wp = (const uint8_t *)(fly[0].wave_ptr);
@@ -410,10 +333,6 @@ ISR(TCB0_INT_vect)
 
     /*
      * Load DDR data for current row.
-     * ddr_data[ddr_index + 0] = PORTOUT row drive
-     * ddr_data[ddr_index + 1] = DDR for LED A
-     * ddr_data[ddr_index + 2] = DDR for LED B
-     * ddr_data[ddr_index + 3] = DDR for LED C
      */
     uint8_t row_drive = ddr_data[ddr_index];
     a_ddr = ddr_data[ddr_index + 1];
@@ -469,14 +388,7 @@ ISR(TCB0_INT_vect)
     }
 
     /*
-     * Build cumulative DDR states.
-     * At start: all 3 LEDs on (a_ddr | b_ddr | c_ddr)
-     * After CMP0 (brightest off): b_ddr | c_ddr
-     * After CMP1 (2nd off): c_ddr only
-     * After CMP2 (dimmest off): 0
-     *
-     * If all brightness values are 0, set all DDR to 0
-     * to prevent ghost glow from brief pin driver activation.
+     * Build DDR states — only for LEDs with brightness > 0.
      */
     uint8_t ddr_all;
     uint8_t ddr_after_a;
@@ -484,59 +396,89 @@ ISR(TCB0_INT_vect)
 
     if (a == 0)
     {
-        /* No LED active in this row. */
-        ddr_all = 0;
-        ddr_after_a = 0;
-        ddr_after_b = 0;
-        row_drive = 0;
+        /* No LED active — clear interrupt flag and return. */
+        TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
+        return;
     }
-    else
+
+    if (b == 0)
     {
-        /*
-         * Only include DDR bits for LEDs with brightness > 0.
-         * LEDs with brightness 0 must not be driven at all.
-         */
-        if (b == 0)
-        {
-            b_ddr = 0;
-            c_ddr = 0;
-        }
-        else if (c == 0)
-        {
-            c_ddr = 0;
-        }
-
-        ddr_all = a_ddr | b_ddr | c_ddr;
-        ddr_after_a = b_ddr | c_ddr;
-        ddr_after_b = c_ddr;
+        b_ddr = 0;
+        c_ddr = 0;
+    }
+    else if (c == 0)
+    {
+        c_ddr = 0;
     }
 
-    /*
-     * Compute row index from ddr_index (which already advanced).
-     * Current row = (ddr_index / 4 - 1) & 3
-     * But since ddr_index already advanced, the row we just
-     * computed brightness for is ((ddr_index - 4) / 4) & 3.
-     */
-    uint8_t row = ((ddr_index - 4) & 0x0F) >> 2;
-    if (ddr_index == 0) row = 3;  /* wrap case */
+    ddr_all = a_ddr | b_ddr | c_ddr;
+    ddr_after_a = b_ddr | c_ddr;
+    ddr_after_b = c_ddr;
 
     /*
-     * Store into PWM buffer for TCA0 to pick up.
-     * Brightness stored directly as CMP values.
-     * Higher brightness = LED on longer = higher CMP value.
+     * Set CMP registers.
      */
-    pwm_buf.brightness[row][0] = a;
-    pwm_buf.brightness[row][1] = b;
-    pwm_buf.brightness[row][2] = c;
+    TCA0.SINGLE.CMP0 = a;
+    TCA0.SINGLE.CMP1 = b;
+    TCA0.SINGLE.CMP2 = c;
 
-    pwm_buf.ddr_row[row][0] = row_drive;
-    pwm_buf.ddr_row[row][1] = ddr_all;
-    pwm_buf.ddr_row[row][2] = ddr_after_a;
-    pwm_buf.ddr_row[row][3] = ddr_after_b;
+    /* Drive the row pin high, others low. */
+    VPORTA.OUT = row_drive;
+
+    /* Turn on active LEDs. */
+    VPORTA.DIR = ddr_all;
+
+    /* Store DDR states for CMP ISRs. */
+    pwm_buf.ddr_row[0][2] = ddr_after_a;
+    pwm_buf.ddr_row[0][3] = ddr_after_b;
 
     /* Clear interrupt flag. */
-    TCB0.INTFLAGS = TCB_CAPT_bm;
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
 }
+
+
+/*
+ * ============================================================
+ * TCA0 CMP0 ISR — Turn off brightest LED
+ * ============================================================
+ */
+
+ISR(TCA0_CMP0_vect)
+{
+    VPORTA.DIR = pwm_buf.ddr_row[0][2];
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP0_bm;
+}
+
+
+/*
+ * ============================================================
+ * TCA0 CMP1 ISR — Turn off 2nd LED
+ * ============================================================
+ */
+
+ISR(TCA0_CMP1_vect)
+{
+    VPORTA.DIR = pwm_buf.ddr_row[0][3];
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP1_bm;
+}
+
+
+/*
+ * ============================================================
+ * TCA0 CMP2 ISR — Turn off dimmest LED (all off)
+ * ============================================================
+ */
+
+ISR(TCA0_CMP2_vect)
+{
+    VPORTA.DIR = 0;
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP2_bm;
+}
+
+
+/*
+ * TCB0 ISR removed — wave advancement is now done in TCA0 OVF ISR.
+ */
 
 
 /*
@@ -721,9 +663,10 @@ void init(void)
     ADC0.CTRLA = 0;
 
     /*
-     * TCA0 — Normal mode, prescaler /2, PER=255.
-     * 20MHz / 2 / 256 = ~39 kHz overflow rate.
-     * 4 rows → ~9.7 kHz per LED.
+     * TCA0 — Normal mode, prescaler /256, PER=255.
+     * 20MHz / 256 / 256 = ~305 Hz overflow rate.
+     * 4 rows → ~76 Hz per LED.
+     * Matches original brightness behavior.
      * Initially stopped.
      */
     TCA0.SINGLE.CTRLA = 0;  /* stopped */
@@ -743,18 +686,10 @@ void init(void)
                             TCA_SINGLE_CMP2_bm;
 
     /*
-     * TCB0 — Periodic Interrupt mode.
-     * Clock: CLK_PER/2 = 10 MHz.
-     * Period: 10000000 / 488 ≈ 20492 ticks → ~488 Hz.
-     * With 4 rows cycling, each firefly gets updated at ~122 Hz.
-     * Initially stopped.
+     * TCB0 — no longer used.
+     * Wave advancement is done in TCA0 OVF ISR directly.
      */
-    TCB0.CTRLA = 0;  /* stopped */
-    TCB0.CTRLB = TCB_CNTMODE_INT_gc;
-    TCB0.CCMP = 20492;
-    TCB0.CNT = 0;
-    TCB0.INTCTRL = TCB_CAPT_bm;
-    TCB0.INTFLAGS = TCB_CAPT_bm;
+    TCB0.CTRLA = 0;
 
     /*
      * RTC / PIT — Periodic Interrupt Timer.
