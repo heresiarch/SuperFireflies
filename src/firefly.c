@@ -192,36 +192,54 @@ uint16_t pit_setup(uint16_t time)
      * Match original wdt_setup() algorithm:
      * Find largest power-of-2 that fits within 'time'.
      *
-     * PIT periods mapped to tick units:
-     *   CYC4096  = 1 tick   (~125 ms)
-     *   CYC8192  = 2 ticks  (~250 ms)
-     *   CYC16384 = 4 ticks  (~500 ms)
-     *   CYC32768 = 8 ticks  (~1 s)
+     * PIT periods mapped to tick units (base = ~16ms):
+     *   CYC512   = 1 tick   (~15.6 ms)
+     *   CYC1024  = 2 ticks  (~31.25 ms)
+     *   CYC2048  = 4 ticks  (~62.5 ms)
+     *   CYC4096  = 8 ticks  (~125 ms)
+     *   CYC8192  = 16 ticks (~250 ms)
+     *   CYC16384 = 32 ticks (~500 ms)
+     *   CYC32768 = 64 ticks (~1 s)
      *
-     * Like the original, we find the largest interval <= time.
+     * This matches the original WDT timing where 1 tick ≈ 16ms.
      */
 
     uint8_t period;
     uint16_t result;
 
-    if (time >= 8)
+    if (time >= 64)
     {
         period = RTC_PERIOD_CYC32768_gc;
+        result = 64;
+    }
+    else if (time >= 32)
+    {
+        period = RTC_PERIOD_CYC16384_gc;
+        result = 32;
+    }
+    else if (time >= 16)
+    {
+        period = RTC_PERIOD_CYC8192_gc;
+        result = 16;
+    }
+    else if (time >= 8)
+    {
+        period = RTC_PERIOD_CYC4096_gc;
         result = 8;
     }
     else if (time >= 4)
     {
-        period = RTC_PERIOD_CYC16384_gc;
+        period = RTC_PERIOD_CYC2048_gc;
         result = 4;
     }
     else if (time >= 2)
     {
-        period = RTC_PERIOD_CYC8192_gc;
+        period = RTC_PERIOD_CYC1024_gc;
         result = 2;
     }
     else
     {
-        period = RTC_PERIOD_CYC4096_gc;
+        period = RTC_PERIOD_CYC512_gc;
         result = 1;
     }
 
@@ -456,10 +474,42 @@ ISR(TCB0_INT_vect)
      * After CMP0 (brightest off): b_ddr | c_ddr
      * After CMP1 (2nd off): c_ddr only
      * After CMP2 (dimmest off): 0
+     *
+     * If all brightness values are 0, set all DDR to 0
+     * to prevent ghost glow from brief pin driver activation.
      */
-    uint8_t ddr_all = a_ddr | b_ddr | c_ddr;
-    uint8_t ddr_after_a = b_ddr | c_ddr;
-    uint8_t ddr_after_b = c_ddr;
+    uint8_t ddr_all;
+    uint8_t ddr_after_a;
+    uint8_t ddr_after_b;
+
+    if (a == 0)
+    {
+        /* No LED active in this row. */
+        ddr_all = 0;
+        ddr_after_a = 0;
+        ddr_after_b = 0;
+        row_drive = 0;
+    }
+    else
+    {
+        /*
+         * Only include DDR bits for LEDs with brightness > 0.
+         * LEDs with brightness 0 must not be driven at all.
+         */
+        if (b == 0)
+        {
+            b_ddr = 0;
+            c_ddr = 0;
+        }
+        else if (c == 0)
+        {
+            c_ddr = 0;
+        }
+
+        ddr_all = a_ddr | b_ddr | c_ddr;
+        ddr_after_a = b_ddr | c_ddr;
+        ddr_after_b = c_ddr;
+    }
 
     /*
      * Compute row index from ddr_index (which already advanced).
@@ -505,6 +555,8 @@ uint16_t update_fireflies(void)
 
     /*
      * Update waves — assign new waves to idle fireflies.
+     * Limit: only one firefly per row group can start per update.
+     * This prevents triplet lockstep.
      */
     fly = (firefly_p)&fireflies[0];
 
@@ -624,6 +676,13 @@ uint16_t update_fireflies(void)
 void init(void)
 {
     /*
+     * Disable the main clock prescaler.
+     * The ATtiny412 boots with a /6 prescaler enabled (3.33 MHz).
+     * We need full 20 MHz. CCP-protected write.
+     */
+    _PROTECTED_WRITE(CLKCTRL.MCLKCTRLB, 0);
+
+    /*
      * Read and clear reset cause.
      */
     reset_cause = RSTCTRL.RSTFR;
@@ -719,6 +778,10 @@ void init(void)
      * LFSR seed from EEPROM.
      */
     load_seed();
+
+    /* Seed must never be 0 (LFSR degenerate state). */
+    if (seed == 0)
+        seed = 0xDEADBEEF;
 
     /* Advance seed and save back. */
     lfsr_poly(32, 0x8140C9D5);

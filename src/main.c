@@ -168,6 +168,9 @@ int main(void)
 
     sei();
 
+    /* TEST: force night mode, bypass LDR */
+    flags |= FLAG_ISNIGHT;
+
     uint16_t timeout = 0;
     uint16_t measure = 0;
 
@@ -274,12 +277,13 @@ int main(void)
 
             /*
              * LDR measurement if due.
+             * TEST: disabled for testing
              */
-            if (flags & FLAG_MEASURE)
-            {
-                flags &= ~FLAG_MEASURE;
-                measure_isnight();
-            }
+            // if (flags & FLAG_MEASURE)
+            // {
+            //     flags &= ~FLAG_MEASURE;
+            //     measure_isnight();
+            // }
 
             /* STANDBY sleep — only PIT wakes us. */
             SLPCTRL.CTRLA = SLPCTRL_SMODE_STDBY_gc | SLPCTRL_SEN_bm;
