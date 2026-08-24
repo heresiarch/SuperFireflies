@@ -268,7 +268,7 @@ ISR(TCA0_OVF_vect)
     uint8_t a_ddr, b_ddr, c_ddr;
     uint8_t tmp;
 
-    /* All LEDs off — high impedance. */
+    /* All LEDs off immediately — both DIR and OUT. */
     VPORTA.DIR = 0;
     VPORTA.OUT = 0;
 
@@ -286,7 +286,6 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         a = *wp;
-        if (a < 60) a = 60;  /* Brightness floor — ATtiny412 needs higher minimum */
         if (++wp >= (const uint8_t *)(fly[0].wave_end))
             wp = 0;
         fly[0].wave_ptr = (uint16_t)wp;
@@ -301,7 +300,6 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         b = *wp;
-        if (b < 60) b = 60;
         if (++wp >= (const uint8_t *)(fly[1].wave_end))
             wp = 0;
         fly[1].wave_ptr = (uint16_t)wp;
@@ -316,7 +314,6 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         c = *wp;
-        if (c < 60) c = 60;
         if (++wp >= (const uint8_t *)(fly[2].wave_end))
             wp = 0;
         fly[2].wave_ptr = (uint16_t)wp;
@@ -400,7 +397,7 @@ ISR(TCA0_OVF_vect)
 
     if (a == 0)
     {
-        /* No LED active. */
+        /* No LED active — clear interrupt flag and return. */
         TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
         return;
     }
@@ -415,26 +412,45 @@ ISR(TCA0_OVF_vect)
         c_ddr = 0;
     }
 
-    ddr_all = a_ddr | b_ddr | c_ddr;
-    ddr_after_a = b_ddr | c_ddr;
-    ddr_after_b = c_ddr;
+    /*
+     * Negate brightness values (same as original).
+     * Higher brightness → smaller negated value → fires earlier → LED on longer.
+     */
+    a = (uint8_t)(0 - a);
+    b = (uint8_t)(0 - b);
+    c = (uint8_t)(0 - c);
 
     /*
-     * Set CMP registers.
+     * Build cumulative DDR states (same as original).
+     * LEDs are turned ON progressively:
+     *   At CMP0 (= negated brightest, fires first): turn on brightest LED
+     *   At CMP1 (= negated medium): turn on brightest + medium
+     *   At CMP2 (= negated dimmest, fires last): turn on all 3
+     * All stay on until next OVF resets.
+     */
+    b_ddr |= a_ddr;   /* b_ddr = LED A + LED B */
+    c_ddr |= b_ddr;   /* c_ddr = LED A + LED B + LED C */
+
+    /*
+     * Set CMP registers (negated = ascending order: a <= b <= c).
+     * CMP0 fires first (brightest), CMP2 fires last (dimmest).
      */
     TCA0.SINGLE.CMP0 = a;
     TCA0.SINGLE.CMP1 = b;
     TCA0.SINGLE.CMP2 = c;
 
-    /* Drive the row pin high. */
+    /* Set PORTB equivalent — row pin high. */
     VPORTA.OUT = row_drive;
 
-    /* Only active LED pairs as output. */
-    VPORTA.DIR = ddr_all;
+    /*
+     * Do NOT set DIR yet — LEDs start OFF.
+     * The CMP ISRs will progressively turn them ON.
+     */
 
     /* Store DDR states for CMP ISRs. */
-    pwm_buf.ddr_row[0][2] = ddr_after_a;
-    pwm_buf.ddr_row[0][3] = ddr_after_b;
+    pwm_buf.ddr_row[0][2] = a_ddr;   /* CMP0: turn on brightest */
+    pwm_buf.ddr_row[0][3] = b_ddr;   /* CMP1: turn on brightest + medium */
+    pwm_buf.brightness[0][0] = c_ddr; /* CMP2: turn on all 3 */
 
     /* Clear interrupt flag. */
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
@@ -443,44 +459,39 @@ ISR(TCA0_OVF_vect)
 
 /*
  * ============================================================
- * TCA0 CMP0 ISR — Turn off brightest LED
+ * TCA0 CMP0 ISR — Turn ON brightest LED (fires first)
  * ============================================================
  */
 
 ISR(TCA0_CMP0_vect)
 {
-    uint8_t ddr = pwm_buf.ddr_row[0][2];
-    VPORTA.DIR = ddr;
-    if (ddr == 0) VPORTA.OUT = 0;
+    VPORTA.DIR = pwm_buf.ddr_row[0][2];
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP0_bm;
 }
 
 
 /*
  * ============================================================
- * TCA0 CMP1 ISR — Turn off 2nd LED
+ * TCA0 CMP1 ISR — Turn ON brightest + medium LED
  * ============================================================
  */
 
 ISR(TCA0_CMP1_vect)
 {
-    uint8_t ddr = pwm_buf.ddr_row[0][3];
-    VPORTA.DIR = ddr;
-    if (ddr == 0) VPORTA.OUT = 0;
+    VPORTA.DIR = pwm_buf.ddr_row[0][3];
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP1_bm;
 }
 
 
 /*
  * ============================================================
- * TCA0 CMP2 ISR — Turn off dimmest LED (all off)
+ * TCA0 CMP2 ISR — Turn ON all 3 LEDs (fires last)
  * ============================================================
  */
 
 ISR(TCA0_CMP2_vect)
 {
-    VPORTA.DIR = 0;
-    VPORTA.OUT = 0;
+    VPORTA.DIR = pwm_buf.brightness[0][0];
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP2_bm;
 }
 
@@ -516,26 +527,6 @@ uint16_t update_fireflies(void)
         if ((fly->wave_ptr == 0) &&
             (fly->hungry == 0))
         {
-            /*
-             * Only allow one firefly per row to start.
-             * Check if any sibling in this row group already has an active wave.
-             */
-            uint8_t pos = (uint8_t)((fly - &fireflies[0]) % 3);
-            firefly_p row_start = fly - pos;
-            uint8_t row_active = 0;
-            for (uint8_t k = 0; k < 3; k++)
-            {
-                if (row_start[k].wave_ptr != 0)
-                    row_active = 1;
-            }
-            if (row_active)
-            {
-                /* Another firefly in this row is playing — skip. */
-                fly->hungry = lfsr(5) + 1;
-                fly++;
-                continue;
-            }
-
             /*
              * Select one of the 32 waves randomly.
              */
@@ -633,9 +624,11 @@ uint16_t update_fireflies(void)
 
     /*
      * Return PIT cycles until next update.
-     * Divided by 4 for faster cycle testing.
+     * Cap at ~5 seconds for responsive animation.
      */
-    return food / 4;
+    if (food > 312)
+        food = 312;
+    return food;
 }
 
 
