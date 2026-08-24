@@ -765,6 +765,10 @@ void init(void)
     while (RTC.STATUS & RTC_CTRLABUSY_bm);
     RTC.CLKSEL = RTC_CLKSEL_INT32K_gc;
 
+    /* Enable RTC with RUNSTDBY so PIT wakes from STANDBY. */
+    while (RTC.STATUS & RTC_CTRLABUSY_bm);
+    RTC.CTRLA = RTC_RUNSTDBY_bm;
+
     while (RTC.PITSTATUS & RTC_CTRLBUSY_bm);
     RTC.PITCTRLA = RTC_PERIOD_CYC4096_gc | RTC_PITEN_bm;
     RTC.PITINTCTRL = RTC_PI_bm;
