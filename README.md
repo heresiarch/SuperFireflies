@@ -5,8 +5,9 @@ that glow, fade, and loosely synchronize with each other — no fixed blink
 pattern, each run looks different.
 
 Port of the [Firefly2026](../Firefly2026) project (ATtiny45 @ 8 MHz) to the
-ATtiny412 @ 20 MHz, leveraging the newer chip's superior hardware for smoother
-PWM, cleaner sleep management, and simpler code.
+ATtiny412 @ 8 MHz (16 MHz oscillator / 2), preserving identical PWM timing
+and wave playback characteristics while using the newer chip's cleaner
+sleep management and simpler code.
 
 Based on the original concept from the
 [mikrocontroller.net thread](https://www.mikrocontroller.net/topic/99803?page=single)
@@ -18,7 +19,7 @@ by H. Reddmann.
 
 | Item | Detail |
 |------|--------|
-| MCU | ATtiny412 @ 20 MHz (internal oscillator, OSCCFG fuse) |
+| MCU | ATtiny412 @ 8 MHz (16 MHz oscillator, /2 prescaler) |
 | Package | 8-pin SOIC |
 | LEDs | 12, wired as antiparallel pairs on 4 pins (charlieplexing) |
 | LDR | PA7 / AIN7 — capacitor discharge method for day/night detection |
@@ -162,7 +163,7 @@ Other supported programmers: `snap_updi`, `pickit4_updi`, `atmelice_updi`.
 |------|-------|---------|
 | WDTCFG | 0x0B | WDT enabled, normal mode, 8s timeout (crash guard) |
 | BODCFG | 0x00 | Brown-out detection disabled |
-| OSCCFG | 0x02 | 20 MHz internal oscillator |
+| OSCCFG | 0x01 | 16 MHz internal oscillator (divided to 8 MHz in software) |
 | TCD0CFG | 0x00 | Default (TCD0 not used) |
 | SYSCFG0 | 0xC9 | Reset pin as RESET (safe for UPDI recovery), CRC disabled |
 | APPEND | 0x00 | No append section |
@@ -181,11 +182,13 @@ you can always reprogram the chip without an HV programmer.
 ┌─────────────────────────────────────────────────────────┐
 │                    FAST DOMAIN (ISRs)                    │
 │                                                         │
-│  TCA0 (305 Hz overflow, 76 Hz per LED)                  │
+│  TCA0 (488 Hz overflow, 122 Hz per LED)                 │
 │  ├─ OVF: all LEDs off, read waves, sort, set PORTOUT    │
 │  ├─ CMP0: turn ON brightest LED (fires first)           │
 │  ├─ CMP1: add medium LED                                │
 │  └─ CMP2: add dimmest LED (fires last)                  │
+│                                                         │
+│  Wave playback at 61 Hz per firefly (half-speed skip)   │
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │                    SLOW DOMAIN (main loop)              │
@@ -203,8 +206,14 @@ you can always reprogram the chip without an HV programmer.
 
 The firmware uses a single timer (TCA0) for both wave playback and
 charlieplex PWM — the same approach as the original ATtiny45 project.
-TCA0 runs at 20 MHz / 256 / 256 = 305 Hz overflow rate. With 4
-charlieplex rows cycling, each LED refreshes at ~76 Hz.
+TCA0 runs at 8 MHz / 64 / 256 = 488 Hz overflow rate. With 4
+charlieplex rows cycling, each LED refreshes at 122 Hz — identical
+to the original.
+
+Wave pointers advance every 2nd full row cycle, giving an effective
+wave playback rate of 61 Hz per firefly. This doubles the wave
+duration for smoother, more visible brightness transitions (author's
+intent: "longer waves so they don't blink so nervously").
 
 Each overflow handles one row of 3 fireflies:
 1. Reads the current wave sample for each firefly
@@ -244,9 +253,10 @@ get even a brief pulse of current.
 ### Wave Playback Rate
 
 Each overflow processes one row (3 fireflies). With 4 rows cycling,
-each firefly's wave pointer advances once every 4 overflows =
-305 / 4 = **~76 Hz per firefly**. This is close to the original's
-122 Hz and produces smooth, natural-looking glow animations.
+each firefly's wave pointer advances once every 8 overflows
+(4 rows × 2 for half-speed skip) = 488 / 8 = **61 Hz per firefly**.
+The longest wave (293 samples) plays for ~4.8 seconds. This matches
+the original design intent for smooth, non-nervous animations.
 
 ### Firefly Simulation
 
@@ -299,8 +309,8 @@ memory-mapped flash). The number of waves is always a power of 2
 ## Resource Usage
 
 ```
-Flash: 3760 / 4096 bytes (91.8%)
-RAM:   136  / 256  bytes (53.1%)
+Flash: 3832 / 4096 bytes (93.6%)
+RAM:   137  / 256  bytes (53.5%)
 ```
 
 The wave table (1654 bytes) dominates flash usage. If larger wave tables
@@ -325,12 +335,11 @@ are needed, consider the ATtiny1614 (16 KB flash, same pinout family).
 
 | Aspect | ATtiny45 (old) | ATtiny412 (new) |
 |--------|---------------|-----------------|
-| Clock | 8 MHz | 20 MHz |
-| Clock prescaler | None (fuse) | /6 default, disabled in software |
-| PWM frequency | ~122 Hz per LED | ~76 Hz per LED |
+| Clock | 8 MHz | 8 MHz (16 MHz osc / 2) |
+| PWM frequency | 122 Hz per LED | 122 Hz per LED (identical) |
 | PWM method | Timer0 OVF + single OCR reprogram | TCA0 OVF + 3 CMP channels (no reprogram) |
 | PWM approach | Progressive LED turn-ON | Same progressive turn-ON (anti-ghost) |
-| Wave sample rate | ~122 Hz | ~76 Hz |
+| Wave sample rate | 122 Hz | 61 Hz (half-speed for longer animations) |
 | Wave timer | Same as PWM timer | Same as PWM timer (TCA0 only) |
 | Sleep timing | WDT (dual-purpose) | RTC/PIT (dedicated, RUNSTDBY) |
 | Crash guard | WDT interrupt+reset trick | WDT pure reset (8s fuse) |
