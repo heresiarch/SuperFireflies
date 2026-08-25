@@ -277,6 +277,14 @@ ISR(TCA0_OVF_vect)
     uint8_t ddr_index = _ddr_idx;
 
     /*
+     * Wave playback at half speed (61 Hz per firefly).
+     * Advance wave pointers only every 2nd full row cycle.
+     * Timer stays at 122 Hz for smooth PWM.
+     */
+    static uint8_t wave_skip = 0;
+    uint8_t do_advance = (wave_skip == 0);
+
+    /*
      * Read wave samples and advance pointers.
      */
     const uint8_t *wp;
@@ -286,9 +294,12 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         a = *wp;
-        if (++wp >= (const uint8_t *)(fly[0].wave_end))
-            wp = 0;
-        fly[0].wave_ptr = (uint16_t)wp;
+        if (do_advance)
+        {
+            if (++wp >= (const uint8_t *)(fly[0].wave_end))
+                wp = 0;
+            fly[0].wave_ptr = (uint16_t)wp;
+        }
     }
     else
     {
@@ -300,9 +311,12 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         b = *wp;
-        if (++wp >= (const uint8_t *)(fly[1].wave_end))
-            wp = 0;
-        fly[1].wave_ptr = (uint16_t)wp;
+        if (do_advance)
+        {
+            if (++wp >= (const uint8_t *)(fly[1].wave_end))
+                wp = 0;
+            fly[1].wave_ptr = (uint16_t)wp;
+        }
     }
     else
     {
@@ -314,9 +328,12 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         c = *wp;
-        if (++wp >= (const uint8_t *)(fly[2].wave_end))
-            wp = 0;
-        fly[2].wave_ptr = (uint16_t)wp;
+        if (do_advance)
+        {
+            if (++wp >= (const uint8_t *)(fly[2].wave_end))
+                wp = 0;
+            fly[2].wave_ptr = (uint16_t)wp;
+        }
     }
     else
     {
@@ -362,6 +379,9 @@ ISR(TCA0_OVF_vect)
         flags = f;
 
         fly = (firefly_p)&fireflies[0];
+
+        /* Toggle wave skip — advance every 2nd full cycle. */
+        wave_skip ^= 1;
     }
 
     _fly_ptr = fly;
