@@ -287,6 +287,7 @@ ISR(TCA0_OVF_vect)
     {
         a = *wp;
         a = (uint8_t)(((uint16_t)a * a) >> 8);  /* Gamma 2.0 */
+        a = (uint8_t)(((uint16_t)a * 160) >> 8); /* Scale to 0-159 */
         if (++wp >= (const uint8_t *)(fly[0].wave_end))
             wp = 0;
         fly[0].wave_ptr = (uint16_t)wp;
@@ -302,6 +303,7 @@ ISR(TCA0_OVF_vect)
     {
         b = *wp;
         b = (uint8_t)(((uint16_t)b * b) >> 8);  /* Gamma 2.0 */
+        b = (uint8_t)(((uint16_t)b * 160) >> 8); /* Scale to 0-159 */
         if (++wp >= (const uint8_t *)(fly[1].wave_end))
             wp = 0;
         fly[1].wave_ptr = (uint16_t)wp;
@@ -317,6 +319,7 @@ ISR(TCA0_OVF_vect)
     {
         c = *wp;
         c = (uint8_t)(((uint16_t)c * c) >> 8);  /* Gamma 2.0 */
+        c = (uint8_t)(((uint16_t)c * 160) >> 8); /* Scale to 0-159 */
         if (++wp >= (const uint8_t *)(fly[2].wave_end))
             wp = 0;
         fly[2].wave_ptr = (uint16_t)wp;
@@ -691,15 +694,15 @@ void init(void)
     ADC0.CTRLA = 0;
 
     /*
-     * TCA0 — Normal mode, prescaler /256, PER=255.
-     * 20MHz / 256 / 256 = 305 Hz overflow rate.
-     * 4 rows → 76 Hz per LED.
-     * No brightness scaling needed (full 0-255 range).
+     * TCA0 — Normal mode, prescaler /256, PER=159.
+     * 20MHz / 256 / 160 = 488 Hz overflow rate.
+     * 4 rows → 122 Hz per LED. Matches original.
+     * Brightness scaled 0-255 to 0-159 in ISR.
      * Initially stopped.
      */
     TCA0.SINGLE.CTRLA = 0;  /* stopped */
     TCA0.SINGLE.CTRLB = TCA_SINGLE_WGMODE_NORMAL_gc;
-    TCA0.SINGLE.PER = 255;
+    TCA0.SINGLE.PER = 159;
     TCA0.SINGLE.CMP0 = 0;
     TCA0.SINGLE.CMP1 = 0;
     TCA0.SINGLE.CMP2 = 0;
