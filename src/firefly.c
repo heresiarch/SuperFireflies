@@ -535,9 +535,16 @@ uint16_t update_fireflies(void)
     firefly_p cur;
 
     /*
-     * Update waves — assign new waves to idle fireflies.
-     * Limit: only one firefly per row group can start per update.
-     * This prevents triplet lockstep.
+     * Update waves — assign a wave to every idle firefly.
+     *
+     * There is no cap: any firefly with a finished wave and
+     * hungry == 0 starts. The group size is governed by the
+     * feeding step below, which subtracts the minimum hungry
+     * value from all fireflies. That guarantees at least one
+     * firefly reaches 0, and only fireflies tied at that
+     * minimum join it — so a typical cycle activates one, and
+     * occasionally two or three. All 12 start only when they
+     * are all tied, which is the case at power-on.
      */
     fly = (firefly_p)&fireflies[0];
 
