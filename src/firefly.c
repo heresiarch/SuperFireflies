@@ -127,7 +127,7 @@ void save_seed(void)
 
 void tca0_start(void)
 {
-    TCA0.SINGLE.CTRLA = TCA_SINGLE_CLKSEL_DIV256_gc | TCA_SINGLE_ENABLE_bm;
+    TCA0.SINGLE.CTRLA = TCA_SINGLE_CLKSEL_DIV64_gc | TCA_SINGLE_ENABLE_bm;
 }
 
 
@@ -286,7 +286,6 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         a = *wp;
-        if (a > 159) a = 159;  /* Clamp to PER */
         if (++wp >= (const uint8_t *)(fly[0].wave_end))
             wp = 0;
         fly[0].wave_ptr = (uint16_t)wp;
@@ -301,7 +300,6 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         b = *wp;
-        if (b > 159) b = 159;  /* Clamp to PER */
         if (++wp >= (const uint8_t *)(fly[1].wave_end))
             wp = 0;
         fly[1].wave_ptr = (uint16_t)wp;
@@ -316,7 +314,6 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         c = *wp;
-        if (c > 159) c = 159;  /* Clamp to PER */
         if (++wp >= (const uint8_t *)(fly[2].wave_end))
             wp = 0;
         fly[2].wave_ptr = (uint16_t)wp;
@@ -646,11 +643,12 @@ uint16_t update_fireflies(void)
 void init(void)
 {
     /*
-     * Disable the main clock prescaler.
-     * The ATtiny412 boots with a /6 prescaler enabled (3.33 MHz).
-     * We need full 20 MHz. CCP-protected write.
+     * Set main clock prescaler to /2.
+     * 16MHz oscillator / 2 = 8MHz CPU clock.
+     * Matches original ATtiny45 clock for identical PWM timing.
      */
-    _PROTECTED_WRITE(CLKCTRL.MCLKCTRLB, 0);
+    _PROTECTED_WRITE(CLKCTRL.MCLKCTRLB,
+        CLKCTRL_PDIV_2X_gc | CLKCTRL_PEN_bm);
 
     /*
      * Read and clear reset cause.
@@ -691,15 +689,15 @@ void init(void)
     ADC0.CTRLA = 0;
 
     /*
-     * TCA0 — Normal mode, prescaler /256, PER=159.
-     * 20MHz / 256 / 160 = 488 Hz overflow rate.
-     * 4 rows → 122 Hz per LED. Matches original.
-     * Values clamped to 0-159 (peaks clip at full bright).
+     * TCA0 — Normal mode, prescaler /64, PER=255.
+     * 8MHz / 64 / 256 = 488 Hz overflow rate.
+     * 4 rows → 122 Hz per LED. Identical to original.
+     * Full 0-255 brightness range.
      * Initially stopped.
      */
     TCA0.SINGLE.CTRLA = 0;  /* stopped */
     TCA0.SINGLE.CTRLB = TCA_SINGLE_WGMODE_NORMAL_gc;
-    TCA0.SINGLE.PER = 159;
+    TCA0.SINGLE.PER = 255;
     TCA0.SINGLE.CMP0 = 0;
     TCA0.SINGLE.CMP1 = 0;
     TCA0.SINGLE.CMP2 = 0;
