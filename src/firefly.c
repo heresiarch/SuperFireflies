@@ -649,14 +649,13 @@ uint16_t update_fireflies(void)
     }
 
     /*
-     * Return PIT cycles until next update.
-     * Multiply by 4 to stretch inter-animation pauses.
-     * Cap at ~60 seconds.
+     * Return PIT ticks until the next update.
+     *
+     * Returned unscaled, exactly as the original does. The PIT
+     * base tick is ~16 ms, matching the original WDT tick, so
+     * the value maps to the same real-world pacing.
      */
-    uint32_t result = (uint32_t)food * 4;
-    if (result > 3750)
-        result = 3750;
-    return (uint16_t)result;
+    return food;
 }
 
 
