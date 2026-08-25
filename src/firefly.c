@@ -277,6 +277,14 @@ ISR(TCA0_OVF_vect)
     uint8_t ddr_index = _ddr_idx;
 
     /*
+     * Wave speed control: advance wave pointers every 2nd
+     * time each row is serviced. This halves the playback
+     * rate (61 Hz per firefly) without changing PWM refresh.
+     */
+    static uint8_t wave_skip = 0;
+    uint8_t do_advance = (wave_skip == 0);
+
+    /*
      * Read wave samples and advance pointers.
      */
     const uint8_t *wp;
@@ -287,10 +295,12 @@ ISR(TCA0_OVF_vect)
     {
         a = *wp;
         a = (uint8_t)(((uint16_t)a * a) >> 8);  /* Gamma 2.0 */
-        a = (uint8_t)(((uint16_t)a * 160) >> 8); /* Scale to 0-159 */
-        if (++wp >= (const uint8_t *)(fly[0].wave_end))
-            wp = 0;
-        fly[0].wave_ptr = (uint16_t)wp;
+        if (do_advance)
+        {
+            if (++wp >= (const uint8_t *)(fly[0].wave_end))
+                wp = 0;
+            fly[0].wave_ptr = (uint16_t)wp;
+        }
     }
     else
     {
@@ -303,10 +313,12 @@ ISR(TCA0_OVF_vect)
     {
         b = *wp;
         b = (uint8_t)(((uint16_t)b * b) >> 8);  /* Gamma 2.0 */
-        b = (uint8_t)(((uint16_t)b * 160) >> 8); /* Scale to 0-159 */
-        if (++wp >= (const uint8_t *)(fly[1].wave_end))
-            wp = 0;
-        fly[1].wave_ptr = (uint16_t)wp;
+        if (do_advance)
+        {
+            if (++wp >= (const uint8_t *)(fly[1].wave_end))
+                wp = 0;
+            fly[1].wave_ptr = (uint16_t)wp;
+        }
     }
     else
     {
@@ -319,15 +331,24 @@ ISR(TCA0_OVF_vect)
     {
         c = *wp;
         c = (uint8_t)(((uint16_t)c * c) >> 8);  /* Gamma 2.0 */
-        c = (uint8_t)(((uint16_t)c * 160) >> 8); /* Scale to 0-159 */
-        if (++wp >= (const uint8_t *)(fly[2].wave_end))
-            wp = 0;
-        fly[2].wave_ptr = (uint16_t)wp;
+        if (do_advance)
+        {
+            if (++wp >= (const uint8_t *)(fly[2].wave_end))
+                wp = 0;
+            fly[2].wave_ptr = (uint16_t)wp;
+        }
     }
     else
     {
         c = 0;
     }
+
+    /*
+     * Toggle wave_skip after each full 4-row cycle.
+     * wave_skip flips 0→1→0... so waves advance every 2nd pass.
+     */
+    if (ddr_index == 12)  /* About to wrap (last row before reset) */
+        wave_skip ^= 1;
 
     /*
      * Set FLAG_WAVE if any firefly in this group is active.
@@ -694,15 +715,15 @@ void init(void)
     ADC0.CTRLA = 0;
 
     /*
-     * TCA0 — Normal mode, prescaler /256, PER=159.
-     * 20MHz / 256 / 160 = 488 Hz overflow rate.
-     * 4 rows → 122 Hz per LED. Matches original.
-     * Brightness scaled 0-255 to 0-159 in ISR.
+     * TCA0 — Normal mode, prescaler /256, PER=255.
+     * 20MHz / 256 / 256 = 305 Hz overflow rate.
+     * 4 rows → 76 Hz per LED.
+     * Full 0-255 brightness range, no scaling needed.
      * Initially stopped.
      */
     TCA0.SINGLE.CTRLA = 0;  /* stopped */
     TCA0.SINGLE.CTRLB = TCA_SINGLE_WGMODE_NORMAL_gc;
-    TCA0.SINGLE.PER = 159;
+    TCA0.SINGLE.PER = 255;
     TCA0.SINGLE.CMP0 = 0;
     TCA0.SINGLE.CMP1 = 0;
     TCA0.SINGLE.CMP2 = 0;
