@@ -188,7 +188,7 @@ you can always reprogram the chip without an HV programmer.
 │  ├─ CMP1: add medium LED                                │
 │  └─ CMP2: add dimmest LED (fires last)                  │
 │                                                         │
-│  Wave playback at 61 Hz per firefly (half-speed skip)   │
+│  One CMP channel armed per active firefly, per row      │
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │                    SLOW DOMAIN (main loop)              │
@@ -210,10 +210,11 @@ TCA0 runs at 8 MHz / 64 / 256 = 488 Hz overflow rate. With 4
 charlieplex rows cycling, each LED refreshes at 122 Hz — identical
 to the original.
 
-Wave pointers advance every 2nd full row cycle, giving an effective
-wave playback rate of 61 Hz per firefly. This doubles the wave
-duration for smoother, more visible brightness transitions (author's
-intent: "longer waves so they don't blink so nervously").
+Wave pointers advance once per row visit, giving 122 Hz per firefly.
+The longer of the two wave tables shipped by the wave editor is used
+(1654 samples), which is what makes the animations slow and smooth
+rather than nervous — the author doubled the sample count, not the
+playback period.
 
 Each overflow handles one row of 3 fireflies:
 1. Reads the current wave sample for each firefly
@@ -244,19 +245,48 @@ progressive turn-on approach avoids this entirely:
    actually drives anything yet.
 3. **CMP ISRs enable DIR only for active LEDs** — pins are only made
    outputs when it's time for their specific LED to conduct.
-4. **Inactive LEDs never get their DIR set** — if brightness is 0,
-   that LED's DDR bits are zeroed before the cumulative OR.
+4. **Only channels with an active firefly are armed** — see below.
 
 This means at no point during the PWM cycle does an unintended LED
 get even a brief pulse of current.
 
+### Per-Row Compare Channel Arming
+
+The negation `compare = 0 - brightness` maps raw values 1…255 to
+compare points 255…1, but raw **0 maps to 0** — the earliest possible
+compare point in the cycle. An idle firefly would therefore trigger a
+compare match at count 0 and, through the cumulative DIR mask, switch
+the active LED of the same row to full brightness for the entire
+cycle. The result is binary on/off behaviour with no visible dimming
+whenever a row contains an idle firefly — which is the normal steady
+state once the startup burst settles.
+
+To prevent this, the OVF ISR arms **one compare channel per active
+firefly** and disables the remaining channels for that row via
+`TCA0.SINGLE.INTCTRL`:
+
+| Active fireflies in row | Armed channels |
+|---|---|
+| 3 | CMP0, CMP1, CMP2 |
+| 2 | CMP0, CMP1 |
+| 1 | CMP0 |
+| 0 | none (row stays dark) |
+
+Because brightness values are sorted descending before negation, the
+active fireflies are always the leading entries, so the armed channels
+are always contiguous from CMP0.
+
+All four interrupt flags are cleared at the very end of the OVF ISR.
+This suppresses compare matches that elapsed while the ISR was still
+running and prevents them from leaking into the next row's cycle —
+the same purpose the original serves with its `TIFR` write.
+
 ### Wave Playback Rate
 
 Each overflow processes one row (3 fireflies). With 4 rows cycling,
-each firefly's wave pointer advances once every 8 overflows
-(4 rows × 2 for half-speed skip) = 488 / 8 = **61 Hz per firefly**.
-The longest wave (293 samples) plays for ~4.8 seconds. This matches
-the original design intent for smooth, non-nervous animations.
+each firefly's wave pointer advances once every 4 overflows =
+488 / 4 = **122 Hz per firefly** — identical to the original. The
+longest wave (293 samples) plays for ~2.4 seconds.
 
 ### Firefly Simulation
 
@@ -309,8 +339,8 @@ memory-mapped flash). The number of waves is always a power of 2
 ## Resource Usage
 
 ```
-Flash: 3832 / 4096 bytes (93.6%)
-RAM:   137  / 256  bytes (53.5%)
+Flash: 3804 / 4096 bytes (92.9%)
+RAM:   111  / 256  bytes (43.4%)
 ```
 
 The wave table (1654 bytes) dominates flash usage. If larger wave tables
@@ -339,7 +369,7 @@ are needed, consider the ATtiny1614 (16 KB flash, same pinout family).
 | PWM frequency | 122 Hz per LED | 122 Hz per LED (identical) |
 | PWM method | Timer0 OVF + single OCR reprogram | TCA0 OVF + 3 CMP channels (no reprogram) |
 | PWM approach | Progressive LED turn-ON | Same progressive turn-ON (anti-ghost) |
-| Wave sample rate | 122 Hz | 61 Hz (half-speed for longer animations) |
+| Wave sample rate | 122 Hz | 122 Hz (identical) |
 | Wave timer | Same as PWM timer | Same as PWM timer (TCA0 only) |
 | Sleep timing | WDT (dual-purpose) | RTC/PIT (dedicated, RUNSTDBY) |
 | Crash guard | WDT interrupt+reset trick | WDT pure reset (8s fuse) |

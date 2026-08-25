@@ -94,24 +94,23 @@ extern const uint8_t ddr_data[16];
 
 /*
  * ============================================================
- * PWM BUFFER — Pre-computed by TCB0 ISR for TCA0
+ * PWM STAGE DDR MASKS
  * ============================================================
  *
- * For each of 4 rows:
- *   brightness[row][0..2] — sorted descending (brightest first)
- *   ddr_row[row][0]       — VPORTA.OUT value (row drive)
- *   ddr_row[row][1]       — DIR with all 3 LEDs on
- *   ddr_row[row][2]       — DIR after brightest off
- *   ddr_row[row][3]       — DIR after 2nd off
+ * Cumulative DIR masks applied by the compare ISRs of the
+ * current charlieplex row. Written by the TCA0 OVF ISR.
+ *
+ *   cmp_ddr[0] — applied at CMP0: brightest LED on
+ *   cmp_ddr[1] — applied at CMP1: brightest + 2nd on
+ *   cmp_ddr[2] — applied at CMP2: all three on
+ *
+ * Only the stages belonging to active fireflies are armed;
+ * the remaining compare interrupts are disabled per row so
+ * an inactive firefly (brightness 0, which negates to 0)
+ * cannot fire a compare match at count 0.
  */
 
-typedef struct
-{
-    uint8_t brightness[4][3];
-    uint8_t ddr_row[4][4];
-} pwm_buffer_t;
-
-extern volatile pwm_buffer_t pwm_buf;
+extern volatile uint8_t cmp_ddr[3];
 
 
 /*

@@ -50,7 +50,7 @@ volatile uint8_t reset_cause = 0;
 
 firefly_t fireflies[12];
 
-volatile pwm_buffer_t pwm_buf;
+volatile uint8_t cmp_ddr[3];
 
 
 /*
@@ -256,10 +256,11 @@ uint16_t pit_setup(uint16_t time)
  * TCA0 OVERFLOW ISR — Row Switch + Wave Advancement
  * ============================================================
  *
- * Fires at ~305 Hz (20MHz / 256 / 256).
+ * Fires at 488 Hz (8MHz / 64 / 256).
  * Each call handles one row: reads wave samples, sorts,
- * sets up CMP registers and DDR. Same approach as original.
- * 4 rows → ~76 Hz per firefly wave sample rate.
+ * negates, and arms the compare channels. Same approach as
+ * the original Timer0 OVF ISR.
+ * 4 rows → 122 Hz per firefly wave sample rate.
  */
 
 ISR(TCA0_OVF_vect)
@@ -277,14 +278,6 @@ ISR(TCA0_OVF_vect)
     uint8_t ddr_index = _ddr_idx;
 
     /*
-     * Wave playback at half speed (61 Hz per firefly).
-     * Advance wave pointers only every 2nd full row cycle.
-     * Timer stays at 122 Hz for smooth PWM.
-     */
-    static uint8_t wave_skip = 0;
-    uint8_t do_advance = (wave_skip == 0);
-
-    /*
      * Read wave samples and advance pointers.
      */
     const uint8_t *wp;
@@ -294,12 +287,9 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         a = *wp;
-        if (do_advance)
-        {
-            if (++wp >= (const uint8_t *)(fly[0].wave_end))
-                wp = 0;
-            fly[0].wave_ptr = (uint16_t)wp;
-        }
+        if (++wp >= (const uint8_t *)(fly[0].wave_end))
+            wp = 0;
+        fly[0].wave_ptr = (uint16_t)wp;
     }
     else
     {
@@ -311,12 +301,9 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         b = *wp;
-        if (do_advance)
-        {
-            if (++wp >= (const uint8_t *)(fly[1].wave_end))
-                wp = 0;
-            fly[1].wave_ptr = (uint16_t)wp;
-        }
+        if (++wp >= (const uint8_t *)(fly[1].wave_end))
+            wp = 0;
+        fly[1].wave_ptr = (uint16_t)wp;
     }
     else
     {
@@ -328,12 +315,9 @@ ISR(TCA0_OVF_vect)
     if (wp != 0)
     {
         c = *wp;
-        if (do_advance)
-        {
-            if (++wp >= (const uint8_t *)(fly[2].wave_end))
-                wp = 0;
-            fly[2].wave_ptr = (uint16_t)wp;
-        }
+        if (++wp >= (const uint8_t *)(fly[2].wave_end))
+            wp = 0;
+        fly[2].wave_ptr = (uint16_t)wp;
     }
     else
     {
@@ -379,9 +363,6 @@ ISR(TCA0_OVF_vect)
         flags = f;
 
         fly = (firefly_p)&fireflies[0];
-
-        /* Toggle wave skip — advance every 2nd full cycle. */
-        wave_skip ^= 1;
     }
 
     _fly_ptr = fly;
@@ -409,71 +390,89 @@ ISR(TCA0_OVF_vect)
     }
 
     /*
-     * Build DDR states — only for LEDs with brightness > 0.
+     * --------------------------------------------------------
+     * Arm only the compare channels that have an active LED.
+     * --------------------------------------------------------
+     *
+     * The negation below maps raw brightness 1..255 to compare
+     * points 255..1, but raw 0 maps to 0 — the earliest possible
+     * compare point. An inactive firefly would therefore fire a
+     * compare match at count 0 and, through the cumulative DDR
+     * mask, switch the active LED of the same row to full
+     * brightness for the whole cycle.
+     *
+     * Values are sorted descending, so the active fireflies are
+     * always the leading entries. We arm one compare channel per
+     * active firefly and disable the rest for this row.
      */
-    uint8_t ddr_all;
-    uint8_t ddr_after_a;
-    uint8_t ddr_after_b;
 
     if (a == 0)
     {
-        /* No LED active — clear interrupt flag and return. */
-        TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
+        /*
+         * No LED active in this row. Disable all compare
+         * interrupts, clear every flag, leave the port idle.
+         */
+        TCA0.SINGLE.INTCTRL = TCA_SINGLE_OVF_bm;
+        TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm |
+                               TCA_SINGLE_CMP0_bm |
+                               TCA_SINGLE_CMP1_bm |
+                               TCA_SINGLE_CMP2_bm;
         return;
     }
 
-    if (b == 0)
-    {
-        b_ddr = 0;
-        c_ddr = 0;
-    }
-    else if (c == 0)
-    {
-        c_ddr = 0;
-    }
-
     /*
-     * Negate brightness values (same as original).
-     * Higher brightness → smaller negated value → fires earlier → LED on longer.
+     * Negate brightness (same as original).
+     * Higher brightness → smaller compare point → LED on longer.
+     * Sorted descending raw values give ascending compare points.
      */
     a = (uint8_t)(0 - a);
-    b = (uint8_t)(0 - b);
-    c = (uint8_t)(0 - c);
 
-    /*
-     * Build cumulative DDR states (same as original).
-     * LEDs are turned ON progressively:
-     *   At CMP0 (= negated brightest, fires first): turn on brightest LED
-     *   At CMP1 (= negated medium): turn on brightest + medium
-     *   At CMP2 (= negated dimmest, fires last): turn on all 3
-     * All stay on until next OVF resets.
-     */
-    b_ddr |= a_ddr;   /* b_ddr = LED A + LED B */
-    c_ddr |= b_ddr;   /* c_ddr = LED A + LED B + LED C */
-
-    /*
-     * Set CMP registers (negated = ascending order: a <= b <= c).
-     * CMP0 fires first (brightest), CMP2 fires last (dimmest).
-     */
+    /* Stage 1 is always present: brightest LED only. */
+    cmp_ddr[0] = a_ddr;
     TCA0.SINGLE.CMP0 = a;
-    TCA0.SINGLE.CMP1 = b;
-    TCA0.SINGLE.CMP2 = c;
 
-    /* Set PORTB equivalent — row pin high. */
+    uint8_t intctrl = TCA_SINGLE_OVF_bm | TCA_SINGLE_CMP0_bm;
+
+    if (b != 0)
+    {
+        /* Stage 2: brightest + second. */
+        b = (uint8_t)(0 - b);
+        b_ddr |= a_ddr;
+        cmp_ddr[1] = b_ddr;
+        TCA0.SINGLE.CMP1 = b;
+        intctrl |= TCA_SINGLE_CMP1_bm;
+
+        if (c != 0)
+        {
+            /* Stage 3: all three. */
+            c = (uint8_t)(0 - c);
+            c_ddr |= b_ddr;
+            cmp_ddr[2] = c_ddr;
+            TCA0.SINGLE.CMP2 = c;
+            intctrl |= TCA_SINGLE_CMP2_bm;
+        }
+    }
+
+    /* Enable only the armed channels. */
+    TCA0.SINGLE.INTCTRL = intctrl;
+
+    /* Row pin high, the other charlieplex pins low. */
     VPORTA.OUT = row_drive;
 
     /*
-     * Do NOT set DIR yet — LEDs start OFF.
-     * The CMP ISRs will progressively turn them ON.
+     * DIR stays 0 — all LEDs start OFF.
+     * The armed compare ISRs turn them on progressively.
      */
 
-    /* Store DDR states for CMP ISRs. */
-    pwm_buf.ddr_row[0][2] = a_ddr;   /* CMP0: turn on brightest */
-    pwm_buf.ddr_row[0][3] = b_ddr;   /* CMP1: turn on brightest + medium */
-    pwm_buf.brightness[0][0] = c_ddr; /* CMP2: turn on all 3 */
-
-    /* Clear interrupt flag. */
-    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;
+    /*
+     * Clear every flag last. This suppresses compare matches
+     * that already elapsed while this ISR was running, exactly
+     * as the original does with TIFR at the end of its OVF ISR.
+     */
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm |
+                           TCA_SINGLE_CMP0_bm |
+                           TCA_SINGLE_CMP1_bm |
+                           TCA_SINGLE_CMP2_bm;
 }
 
 
@@ -485,7 +484,7 @@ ISR(TCA0_OVF_vect)
 
 ISR(TCA0_CMP0_vect)
 {
-    VPORTA.DIR = pwm_buf.ddr_row[0][2];
+    VPORTA.DIR = cmp_ddr[0];
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP0_bm;
 }
 
@@ -498,7 +497,7 @@ ISR(TCA0_CMP0_vect)
 
 ISR(TCA0_CMP1_vect)
 {
-    VPORTA.DIR = pwm_buf.ddr_row[0][3];
+    VPORTA.DIR = cmp_ddr[1];
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP1_bm;
 }
 
@@ -511,7 +510,7 @@ ISR(TCA0_CMP1_vect)
 
 ISR(TCA0_CMP2_vect)
 {
-    VPORTA.DIR = pwm_buf.brightness[0][0];
+    VPORTA.DIR = cmp_ddr[2];
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_CMP2_bm;
 }
 
@@ -722,10 +721,13 @@ void init(void)
     TCA0.SINGLE.CMP1 = 0;
     TCA0.SINGLE.CMP2 = 0;
     TCA0.SINGLE.CNT = 0;
-    TCA0.SINGLE.INTCTRL = TCA_SINGLE_OVF_bm |
-                           TCA_SINGLE_CMP0_bm |
-                           TCA_SINGLE_CMP1_bm |
-                           TCA_SINGLE_CMP2_bm;
+
+    /*
+     * Only the overflow interrupt is enabled here.
+     * The OVF ISR arms the compare interrupts per row,
+     * one channel per active firefly.
+     */
+    TCA0.SINGLE.INTCTRL = TCA_SINGLE_OVF_bm;
     TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm |
                             TCA_SINGLE_CMP0_bm |
                             TCA_SINGLE_CMP1_bm |
