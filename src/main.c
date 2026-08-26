@@ -68,12 +68,23 @@ void measure_isnight(void)
      * - Prescaler /16 → 20MHz/16 = 1.25 MHz ADC clock
      * - RUNSTDBY for noise reduction
      */
-    ADC0.CTRLA = ADC_ENABLE_bm | ADC_RUNSTBY_bm;
+    ADC0.CTRLA = ADC_ENABLE_bm;
     ADC0.CTRLB = 0;  /* No accumulation */
     ADC0.CTRLC = ADC_PRESC_DIV16_gc | ADC_REFSEL_VDDREF_gc | ADC_SAMPCAP_bm;
     ADC0.CTRLD = 0;
     ADC0.MUXPOS = LDR_MUXPOS;
-    ADC0.INTCTRL = ADC_RESRDY_bm;
+
+    /*
+     * The RESRDY interrupt stays DISABLED throughout.
+     *
+     * Every conversion below is awaited by polling INTFLAGS. An
+     * enabled RESRDY interrupt would fire the moment the flag is
+     * set and clear it inside the ISR, so the polling loop would
+     * never observe it and would spin forever — taking the whole
+     * lamp down with it, since main then never reaches its
+     * watchdog kick.
+     */
+    ADC0.INTCTRL = 0;
 
     /*
      * Run several conversions while charging the capacitor.
@@ -114,14 +125,17 @@ void measure_isnight(void)
 
     /*
      * Perform the actual measurement.
-     * Enter STANDBY for noise reduction while ADC runs.
+     *
+     * Polled, not slept through. A conversion takes ~26 µs at
+     * this prescaler, so there is nothing meaningful to save by
+     * sleeping, and sleeping here was actively unsafe: the PIT
+     * runs with RUNSTDBY and could wake us before the conversion
+     * finished, leaving a stale ADC0.RES to be read as a valid
+     * light level.
      */
-    SLPCTRL.CTRLA = SLPCTRL_SMODE_STDBY_gc | SLPCTRL_SEN_bm;
-
     ADC0.COMMAND = ADC_STCONV_bm;
-    sleep_cpu();
+    while (!(ADC0.INTFLAGS & ADC_RESRDY_bm));
 
-    /* Woken by ADC RESRDY interrupt. */
     ldr_value = ADC0.RES;
 
     /*
@@ -136,25 +150,16 @@ void measure_isnight(void)
      * Disable ADC for power savings.
      */
     ADC0.CTRLA = 0;
-    ADC0.INTCTRL = 0;
 
     /* PA7 safely as input, no pull-up. */
     PORTA.DIRCLR = (1 << LDR_PIN);
     PORTA.OUTCLR = (1 << LDR_PIN);
 }
 
-
 /*
- * ============================================================
- * ADC RESULT READY ISR — Wakes CPU from STANDBY
- * ============================================================
+ * No ADC0_RESRDY ISR exists on purpose — see the note in
+ * measure_isnight(). All conversions are awaited by polling.
  */
-
-ISR(ADC0_RESRDY_vect)
-{
-    /* Just wake the CPU. Flag cleared by reading ADC0.RES. */
-    ADC0.INTFLAGS = ADC_RESRDY_bm;
-}
 
 
 /*
