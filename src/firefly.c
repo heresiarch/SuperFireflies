@@ -46,6 +46,19 @@ const uint8_t ddr_data[16] =
 
 volatile uint8_t flags = 0;
 
+/*
+ * Cross-context flags — one byte each, see firefly.h.
+ */
+volatile uint8_t wave_active = 0;
+volatile uint8_t pit_tick = 0;
+
+/*
+ * ISR-private: set when any firefly in the current 4-row cycle
+ * had an active wave. Only the TCA0 OVF ISR touches this, so it
+ * needs no synchronisation at all.
+ */
+static uint8_t wave_seen = 0;
+
 volatile uint8_t reset_cause = 0;
 
 firefly_t fireflies[12];
@@ -325,12 +338,12 @@ ISR(TCA0_OVF_vect)
     }
 
     /*
-     * Set FLAG_WAVE if any firefly in this group is active.
+     * Note activity if any firefly in this group is running.
      */
     if (fly[0].wave_ptr | fly[1].wave_ptr | a | b | c |
         fly[2].wave_ptr)
     {
-        flags |= FLAG_WAVE;
+        wave_seen = 1;
     }
 
     /*
@@ -352,15 +365,15 @@ ISR(TCA0_OVF_vect)
      */
     if (ddr_index == 0)
     {
-        uint8_t f = flags;
+        /*
+         * A full 4-row cycle just finished. If nothing was
+         * active anywhere in it, tell main the timer can stop.
+         * Both are plain byte stores — no read-modify-write.
+         */
+        if (wave_seen == 0)
+            wave_active = 0;
 
-        if (!(f & FLAG_WAVE))
-        {
-            f &= ~FLAG_TIMER;
-        }
-
-        f &= ~FLAG_WAVE;
-        flags = f;
+        wave_seen = 0;
 
         fly = (firefly_p)&fireflies[0];
     }
@@ -566,11 +579,18 @@ uint16_t update_fireflies(void)
             /* Wave end pointer. */
             cur->wave_end = (uint16_t)(wd->wave_end);
 
-            /* Atomically activate wave. */
+            /*
+             * Activate the wave, then mark the timer as needed.
+             *
+             * wave_ptr is 16-bit so its store is masked; both
+             * bytes must land before the ISR can observe it.
+             * wave_active is a single byte and needs no masking.
+             */
             cli();
             cur->wave_ptr = ptr;
-            flags |= FLAG_TIMER;
             sei();
+
+            wave_active = 1;
 
             /* Energy for this wave. */
             uint16_t energy = wd->energy;
@@ -649,6 +669,37 @@ uint16_t update_fireflies(void)
     }
 
     /*
+     * --------------------------------------------------------
+     * Stall guard
+     * --------------------------------------------------------
+     *
+     * TCA0 is the only thing that advances wave_ptr. If it is
+     * stopped while a firefly still has an unfinished wave, that
+     * firefly freezes forever: wave_ptr never reaches 0, so it
+     * never qualifies for a restart above, and nothing ever sets
+     * wave_active again. Enough of those and the lamp goes dark
+     * permanently — with main() still looping and dutifully
+     * kicking the watchdog, so the crash guard never fires.
+     *
+     * The ISR decides to clear wave_active from an observation
+     * made over the previous 4-row cycle, which can predate a
+     * wave that main just started. Rather than tighten that
+     * handshake, assert the invariant directly here: any
+     * unfinished wave means the timer must run.
+     */
+    fly = (firefly_p)&fireflies[0];
+
+    for (uint8_t i = 12; i > 0; i--)
+    {
+        if (fly->wave_ptr != 0)
+        {
+            wave_active = 1;
+            break;
+        }
+        fly++;
+    }
+
+    /*
      * Return PIT ticks until the next update.
      *
      * Returned unscaled, exactly as the original does. The PIT
@@ -688,6 +739,9 @@ void init(void)
     _ddr_idx = 0;
     _row_idx = 0;
     flags = 0;
+    wave_active = 0;
+    pit_tick = 0;
+    wave_seen = 0;
 
     /*
      * PORT — all pins input, no pull-ups.

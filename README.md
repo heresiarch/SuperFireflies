@@ -193,7 +193,7 @@ you can always reprogram the chip without an HV programmer.
 ├─────────────────────────────────────────────────────────┤
 │                    SLOW DOMAIN (main loop)              │
 │                                                         │
-│  RTC/PIT ──► FLAG_UPDATE ──► update_fireflies()        │
+│  RTC/PIT ──► pit_tick ──► update_fireflies()           │
 │              (16ms–1s)        energy/hungry logic       │
 │                                                         │
 │  Periodic ──► measure_isnight() ──► day/night switch   │

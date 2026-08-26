@@ -11,11 +11,33 @@
  * ============================================================
  */
 
-#define FLAG_WAVE       (1 << 0)
-#define FLAG_TIMER      (1 << 1)
-#define FLAG_UPDATE     (1 << 2)
-#define FLAG_ISNIGHT    (1 << 3)
-#define FLAG_MEASURE    (1 << 4)
+/*
+ * Bits in 'flags' are owned exclusively by main() context.
+ * No ISR touches them, so read-modify-write is safe here.
+ */
+#define FLAG_ISNIGHT    (1 << 0)
+#define FLAG_MEASURE    (1 << 1)
+
+/*
+ * Flags that cross the ISR/main boundary each get their own
+ * byte. A byte load or store is a single instruction on AVR,
+ * so these need no interrupt masking — the read-modify-write
+ * race is removed by construction rather than guarded against.
+ *
+ * A shared bitmask would not be safe: 'flags |= BIT' compiles
+ * to load / or / store, and an interrupt landing between the
+ * load and the store silently discards whatever the ISR wrote.
+ *
+ *   wave_active — set by update_fireflies() (main context),
+ *                 cleared by the TCA0 OVF ISR when a full
+ *                 4-row cycle passes with no active firefly.
+ *                 Tells main whether TCA0 must keep running.
+ *
+ *   pit_tick    — set by the RTC PIT ISR, cleared by main
+ *                 once the wakeup has been handled.
+ */
+extern volatile uint8_t wave_active;
+extern volatile uint8_t pit_tick;
 
 /*
  * MEASURE_INTERVAL: PIT ticks (~125ms each) between LDR measurements.

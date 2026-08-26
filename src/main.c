@@ -14,7 +14,8 @@
 
 ISR(RTC_PIT_vect)
 {
-    flags |= FLAG_UPDATE;
+    /* Plain byte store — see firefly.h on why this is its own byte. */
+    pit_tick = 1;
     RTC.PITINTFLAGS = RTC_PI_bm;
 }
 
@@ -190,12 +191,12 @@ int main(void)
 
         /*
          * ====================================================
-         * PIT WAKEUP — FLAG_UPDATE
+         * PIT WAKEUP
          * ====================================================
          */
-        if (flags & FLAG_UPDATE)
+        if (pit_tick)
         {
-            flags &= ~FLAG_UPDATE;
+            pit_tick = 0;
 
             if (timeout == 0)
             {
@@ -244,7 +245,7 @@ int main(void)
          * TCA0 and TCB0 run. CPU sleeps in IDLE.
          * Timer ISRs continue driving the LEDs.
          */
-        if (flags & FLAG_TIMER)
+        if (wave_active)
         {
             /* Ensure timers are running. */
             tca0_start();
