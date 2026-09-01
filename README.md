@@ -87,32 +87,24 @@ resistors.
 ## LDR Circuit
 
 ```
-               10k
-VCC ──────────/\/\/──────┬─── PA7 / AIN7
-                         │
-                    ┌────┴────┐
-                    │         │
-                  ┌───┐     ┌───┐
-                  │LDR│     │10n│
-                  └───┘     └───┘
-                    │         │
-                    └────┬────┘
-                         │
-                        GND
+              10k          ┌───────┬───────┐
+PA7/AIN7 ────/\/\/─────────┤       │       │
+                         ┌───┐   ┌───┐
+                         │LDR│   │10n│
+                         └───┘   └───┘
+                           │       │
+                          GND     GND
 ```
 
-The 10k resistor connects VCC to the measurement pin (PA7). The LDR and
-10 nF capacitor are in parallel, both between PA7 and GND.
+PA7 connects through a 10k series resistor to a node that carries the
+LDR and a 10 nF capacitor, both in parallel to GND.
 
-**Measurement principle:**
-1. PA7 set as output HIGH — charges the 10 nF capacitor through the pin
-   (overriding the voltage divider)
-2. PA7 set as input (high-impedance) — capacitor discharges through the LDR
-3. ADC reads remaining voltage on the capacitor
-
-The 10k pull-up to VCC provides a defined voltage divider with the LDR
-during steady-state, but the measurement uses the transient discharge
-method for better sensitivity:
+**Measurement principle (capacitor charge/discharge):**
+1. PA7 driven HIGH — charges the 10 nF cap through the 10k (tau ≈ 100 µs).
+2. PA7 switched to high-impedance input — with no current through the
+   10k, the pin reads the node voltage directly.
+3. The cap discharges through the LDR; the ADC reads the remaining
+   voltage after a short fixed delay.
 
 A **high ADC value** means the capacitor discharged slowly (LDR is high
 impedance) — it is **dark** (night mode active, fireflies enabled).

@@ -27,24 +27,28 @@ ISR(RTC_PIT_vect)
  *
  * LDR circuit:
  *
- *                10k
- * VCC ─────────/\/\/──────┬─── PA7 / AIN7
- *                         │
- *                    ┌────┴────┐
- *                    │         │
- *                   LDR       10nF
- *                    │         │
- *                    └────┬────┘
- *                         │
- *                        GND
+ *              10k          ┌──────┬──────┐
+ * PA7/AIN7 ───/\/\/─────────┤      │      │
+ *                          LDR    10nF
+ *                           │      │
+ *                          GND    GND
  *
- * 10k from VCC to PA7. LDR and 10nF cap in parallel, both
- * between PA7 and GND.
+ * PA7 connects through a 10k series resistor to a node that
+ * has the LDR and a 10nF capacitor in parallel to GND.
  *
- * Charge the capacitor via PA7 (output HIGH), then make
- * PA7 high-impedance. The capacitor discharges through the
- * LDR. A high ADC value means the LDR is high-impedance
- * (dark) — night mode active.
+ * Measurement (capacitor charge/discharge method):
+ *   1. Drive PA7 HIGH — charges the cap through the 10k.
+ *   2. Make PA7 high-impedance input — with no current through
+ *      the 10k, the pin reads the node voltage directly.
+ *   3. The cap discharges through the LDR:
+ *        bright → low LDR resistance → fast discharge → low ADC
+ *        dark   → high LDR resistance → slow discharge → high ADC
+ *   4. A high ADC value means dark — night mode active.
+ *
+ * Note: the 10k sits between the pin and the ADC sample-and-hold
+ * cap, so it raises the source impedance during sampling. Only a
+ * coarse day/night threshold is needed, so this is acceptable;
+ * ADC_SAMPCAP reduces the sample cap to help settling.
  */
 
 void measure_isnight(void)
@@ -55,7 +59,8 @@ void measure_isnight(void)
     flags &= ~FLAG_ISNIGHT;
 
     /*
-     * Charge the 10 nF capacitor via PA7.
+     * Charge the 10 nF capacitor by driving PA7 HIGH.
+     * Charge path is PA7 → 10k → cap, tau = 10k × 10nF = 100 µs.
      */
     PORTA.DIRSET = (1 << LDR_PIN);
     PORTA.OUTSET = (1 << LDR_PIN);
@@ -101,10 +106,10 @@ void measure_isnight(void)
     }
 
     /*
-     * Make PA7 high-impedance.
-     * Capacitor now discharges through the LDR.
-     * The 10k pull-up to VCC is always present but the LDR
-     * dominates the discharge when illuminated (low resistance).
+     * Make PA7 high-impedance. The capacitor now discharges
+     * through the LDR only (the 10k leads to a high-impedance
+     * input, so no current flows that way and the pin reads
+     * the node voltage directly).
      */
     PORTA.DIRCLR = (1 << LDR_PIN);
     PORTA.OUTCLR = (1 << LDR_PIN);
